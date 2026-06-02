@@ -1,0 +1,76 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+.env
+.env.*
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Local notebooks and OS files
+.DS_Store
+.ipynb_checkpoints/
+*.ipynb_checkpoints/
+*.tmp
+*.log
+*.out
+
+# NFL Big Data Bowl raw/local data
+games.csv
+players.csv
+plays.csv
+player_play.csv
+tracking_week_*.csv
+merged_data.csv
+passing_sample.csv
+football_rushing_week_*.csv
+rushing_week_*.csv
+data/
+raw_data/
+input/
+
+# Results
+expected_yards_output*/
+graph_transformer*/
+results/
+outputs/
+figures/
+analysis/
+model_error_comparison.csv
+model_error_comparison.png
+
+# Model artifacts
+*.pkl
+*.pt
+*.pth
+*.joblib
+*.model
+*.onnx
+
+# Large generated tables
+receiver_opportunity_features.csv
+receiver_expected_yards.csv
+play_decision_summary.csv
+enriched_play_decision_summary.csv
+qb_summary*.csv
+team_summary.csv
+coverage_summary.csv
+pressure_lane_summary.csv
+time_curve_summary.csv
+top_missed_plays*.csv
+model_metrics.json
+
+# Keep repository docs and configuration tracked.
+!README.md
+!Makefile
+!requirements.txt
+!.gitignore
+!docs/
+!docs/*.md
