@@ -18,21 +18,17 @@ In football terms, this is trying to separate:
 
 ## Executive Summary
 
-The main finding is that quarterback decision making is more complicated than the box score. A completion is not always the best decision, and an incompletion is not always a bad decision. This project grades the decision before the ball is thrown.
-
-The main XGBoost model evaluated 6,366 targeted passing plays and more than 1.1 million receiver-frame opportunities from Weeks 1-9. On the test set, the model predicted completion with a 0.786 AUC and total receiving yards with a 3.85-yard mean absolute error. The graph attention plus temporal transformer model improved after adding play context and a direct total-yards prediction, but XGBoost still had the better total-yards error. The graph model was better at predicting YAC, which suggests it is learning some movement information, but it is not ready to replace the XGBoost model.
+The main XGBoost model evaluated 6,366 targeted passing plays and more than 1.1 million receiver-frame opportunities from Weeks 1-9. On the test set, the model predicted completion with a 0.786 AUC -this is a good predictive score shows the model is learning while a 0.5 AUC would be more of a coinflip model- and total receiving yards with a 3.85 MAE meaning on average our predicted yards are off by less then 4 yards. I also tried using a GAT model with a temporal transformer, but XGBoost still had the better total-yards error. The graph model was better at predicting YAC, which suggests it is learning some movement information, but it is not ready to replace the XGBoost model.
 
 On the test split, quarterbacks threw to the model's best receiver about 25.2% of the time. When close choices are counted with a dynamic acceptable range, that rises to 40.3%. The average missed value was about 3.5 expected yards at the actual throw frame. Timing was stricter: the right receiver at the right time happened about 5.0% of the time, while acceptable timing happened about 17.9% of the time.
 
-This does not mean quarterbacks are usually wrong. It means the model often finds another receiver or another moment that looked better. In real scouting work, that should be treated as a film-study flag, not as an automatic negative grade.
+This does not mean quarterbacks are usually wrong as there are factors that aren't entirely quantitative such as yards to down, play design ie what was the progression like on that play and interception percentage (due to the small number of interceptions this part of the model and the detraction of yards is a bit more variable). But this model can tell us that it believes there is another receiver or another moment to throw that looked better and this can be of real value as a film-study flag, not as an automatic negative grade.
 
-Among QBs with at least 50 throws, Lamar Jackson, Patrick Mahomes, Marcus Mariota, P.J. Walker, and Cooper Rush had some of the lowest missed expected yards. Their acceptable-choice rates were 52.0% for Jackson, 43.4% for Mahomes, 43.7% for Mariota, 42.3% for Walker, and 40.7% for Rush. The strongest acceptable-choice rates overall included Lamar Jackson at 52.0%, Jalen Hurts at 48.1%, Aaron Rodgers at 47.6%, Tua Tagovailoa at 47.2%, Zach Wilson at 44.2%, Russell Wilson at 44.0%, Ryan Tannehill at 43.9%, Justin Fields at 43.8%, Marcus Mariota at 43.7%, Patrick Mahomes at 43.4%, Trevor Lawrence at 43.2%, and Josh Allen at 43.1%.
+Among QBs with at least 50 throws, Lamar Jackson, Patrick Mahomes, Marcus Mariota, P.J. Walker, and Cooper Rush had some of the lowest missed expected yards.  Their acceptable-choice rates were 52.0% for Jackson, 43.4% for Mahomes, 43.7% for Mariota, 42.3% for Walker, and 40.7% for Rush. The strongest acceptable-choice rates (acceptable choce being a linear regression band being variable to the "correct option") overall included Lamar Jackson at 52.0%, Jalen Hurts at 48.1%, Aaron Rodgers at 47.6%, Tua Tagovailoa at 47.2%, Zach Wilson at 44.2%, Russell Wilson at 44.0%, Ryan Tannehill at 43.9%, Justin Fields at 43.8%, Marcus Mariota at 43.7%, Patrick Mahomes at 43.4%, Trevor Lawrence at 43.2%, and Josh Allen at 43.1%. These results are interesting as it shows the model is valueing more risky play then tradional metrics this can be because of the inefficencies of the data pipeline, such as making the interception pipelien more robust but it can also show that some quarterbacks are making correct decsions but are not throwing the ball accurate enough to result in great plays. 
 
 The best use of this project is to identify plays where the model and the quarterback disagreed, then watch the film. The scout can ask: was the better option actually visible, did pressure force the throw, was the quarterback working a designed read, or did he really miss a better window?
 
-For more detail, see [docs/TECHNICAL_SUMMARY.md](docs/TECHNICAL_SUMMARY.md).
-
-## What The Metrics Mean
+## Metric Explanation
 
 ### Expected yards
 
