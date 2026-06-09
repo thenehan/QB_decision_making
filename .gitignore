@@ -39,6 +39,9 @@ input/
 # Results
 expected_yards_output*/
 graph_transformer*/
+graph_feature_smoke/
+graph_task_smoke/
+graph_*_all_weeks/
 results/
 outputs/
 figures/

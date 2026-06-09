@@ -13,6 +13,8 @@ GRAPH_EPOCHS ?= 20
 GRAPH_BATCH_SIZE ?= 64
 GRAPH_LEARNING_RATE ?= 0.0005
 GRAPH_PATIENCE ?= 5
+GRAPH_TASK ?= all
+INTERCEPTION_POS_WEIGHT_CAP ?= 10.0
 TEST_WEEKS ?=
 ACCEPTABLE_YARDS_GAP ?= 1.0
 ACCEPTABLE_YARDS_PCT ?= 0.20
@@ -88,7 +90,9 @@ graph-smoke:
 		--epochs $(GRAPH_EPOCHS) \
 		--batch-size $(GRAPH_BATCH_SIZE) \
 		--learning-rate $(GRAPH_LEARNING_RATE) \
-		--early-stop-patience $(GRAPH_PATIENCE)
+		--early-stop-patience $(GRAPH_PATIENCE) \
+		--interception-pos-weight-cap $(INTERCEPTION_POS_WEIGHT_CAP) \
+		--prediction-task $(GRAPH_TASK)
 
 graph-train:
 	$(PYTHON) spatiotemporal_graph_transformer.py \
@@ -99,7 +103,9 @@ graph-train:
 		--epochs $(GRAPH_EPOCHS) \
 		--batch-size $(GRAPH_BATCH_SIZE) \
 		--learning-rate $(GRAPH_LEARNING_RATE) \
-		--early-stop-patience $(GRAPH_PATIENCE)
+		--early-stop-patience $(GRAPH_PATIENCE) \
+		--interception-pos-weight-cap $(INTERCEPTION_POS_WEIGHT_CAP) \
+		--prediction-task $(GRAPH_TASK)
 
 graph-infer:
 	$(PYTHON) spatiotemporal_graph_transformer.py \

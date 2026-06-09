@@ -23,6 +23,10 @@ OFFENSIVE_GOAL_X = 110.0
 FRAMES_PER_SECOND = 10.0
 
 TREE_MODEL_FAMILY = "xgboost"
+COMPLETION_CALIBRATION_WEIGHT = 0.30
+INTERCEPTION_CALIBRATION_WEIGHT = 0.40
+COMPLETION_SMOOTHING = 20.0
+INTERCEPTION_SMOOTHING = 100.0
 SIMILARITY_FEATURE_COLUMNS = [
     "seconds_since_snap","target_depth","target_distance_from_qb","target_width_from_middle",
     "target_depth_past_sticks","nearest_rusher_distance","throwing_lane_defender_count",
@@ -34,7 +38,8 @@ PASS_EVENTS = {"pass_forward", "pass_shovel"}
 DEAD_EVENTS = {"qb_sack","qb_strip_sack","qb_slide","tackle","out_of_bounds","touchdown","fumble","fumble_offense_recovered","fumble_defense_recovered",}
 FEATURE_COLUMNS = ["seconds_since_snap","down","yardsToGo","pre_snap_ep","receiver_x","receiver_y","receiver_speed",
     "receiver_accel","receiver_dir_sin","receiver_dir_cos","receiver_vx","receiver_vy","yards_past_los","yards_to_goal",
-    "sideline_distance","qb_x","qb_y","qb_speed","throw_distance","estimated_ball_travel_time","target_point_x",
+    "sideline_distance","qb_x","qb_y","qb_speed","qb_orientation_sin","qb_orientation_cos","qb_facing_receiver_cos",
+    "qb_facing_target_cos","target_front_side","throw_distance","estimated_ball_travel_time","target_point_x",
     "target_point_y","target_point_distance_from_receiver","target_depth","target_width_from_middle","target_y_from_middle",
     "target_yards_to_goal","target_distance_from_qb","target_depth_past_sticks","target_behind_los","target_short",
     "target_intermediate","target_deep","projected_receiver_x","projected_receiver_y","projected_yards_past_los",
@@ -45,7 +50,9 @@ FEATURE_COLUMNS = ["seconds_since_snap","down","yardsToGo","pre_snap_ep","receiv
     "defender_3_speed","defender_3_closing_speed","defender_4_distance","defender_4_x_diff","defender_4_y_diff",
     "defender_4_speed","defender_4_closing_speed","throwing_lane_defender_count","throwing_lane_closest_distance",
     "throwing_lane_downfield_defender_count","throwing_lane_width","throwing_lane_near_qb_count","throwing_lane_near_catch_count",
-    "throwing_lane_facing_qb_count","catch_point_nearest_defender_distance","catch_point_nearest_defender_time",
+    "throwing_lane_facing_qb_count","throwing_lane_midfield_defender_count","throwing_lane_closest_progress",
+    "throwing_lane_closest_qb_distance","throwing_lane_density","receiver_lane_separation_gap",
+    "catch_point_nearest_defender_distance","catch_point_nearest_defender_time",
     "catch_point_defender_arrival_margin","catch_point_defenders_with_arrival_chance","catch_point_defenders_within_3",
     "catch_point_defenders_within_5","catch_point_defenders_within_8","catch_point_nearest_defender_x_diff","catch_point_nearest_defender_y_diff",
     "catch_point_open_grass_yards","catch_point_blockers_within_5","catch_point_blockers_within_8","catch_point_blocker_advantage_5",]
@@ -67,6 +74,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--interception-yard-penalty",type=float,default=-45.0,help="Yard value assigned to an interception in risk-adjusted expected yards.",)
     parser.add_argument("--similar-throws",type=int,default=100,help="Number of nearest historical throws used for Bayesian completion uncertainty.",)
     parser.add_argument("--bayes-model-strength",type=float,default=25.0,help="Pseudo-sample strength assigned to the tree-model completion prediction.",)
+    parser.add_argument("--interception-positive-weight-cap", type=float, default=50.0)
     return parser.parse_args()
 
 
@@ -94,6 +102,14 @@ def normalize_tracking_coordinates(df: pd.DataFrame)-> pd.DataFrame:
     out["dir_norm_radians"]=np.arctan2(out["vx_norm"], out["vy_norm"])
     out["dir_sin"]=np.sin(out["dir_norm_radians"])
     out["dir_cos"]=np.cos(out["dir_norm_radians"])
+    orientation_radians = np.deg2rad(out["o"].fillna(out["dir"]).fillna(0.0))
+    ox = np.sin(orientation_radians)
+    oy = np.cos(orientation_radians)
+    out["orientation_x_norm"] = np.where(going_right, ox, -ox)
+    out["orientation_y_norm"] = np.where(going_right, oy, -oy)
+    out["orientation_norm_radians"] = np.arctan2(out["orientation_x_norm"], out["orientation_y_norm"])
+    out["orientation_sin"] = np.sin(out["orientation_norm_radians"])
+    out["orientation_cos"] = np.cos(out["orientation_norm_radians"])
     return out
 
 
@@ -186,6 +202,10 @@ def add_throwing_lane_features(receivers: pd.DataFrame, defenders: pd.DataFrame)
         out["throwing_lane_near_qb_count"] =0
         out["throwing_lane_near_catch_count"] =0
         out["throwing_lane_facing_qb_count"]= 0
+        out["throwing_lane_midfield_defender_count"] = 0
+        out["throwing_lane_closest_progress"] = 1.0
+        out["throwing_lane_closest_qb_distance"] = out["target_distance_from_qb"]
+        out["throwing_lane_density"] = 0.0
         return out
 
     receiver_cols = ["gameId","playId","frameId","nflId","qb_x","qb_y","target_point_x","target_point_y",]
@@ -220,13 +240,20 @@ def add_throwing_lane_features(receivers: pd.DataFrame, defenders: pd.DataFrame)
         out["throwing_lane_near_qb_count"] = 0
         out["throwing_lane_near_catch_count"] = 0
         out["throwing_lane_facing_qb_count"] = 0
+        out["throwing_lane_midfield_defender_count"] = 0
+        out["throwing_lane_closest_progress"] = 1.0
+        out["throwing_lane_closest_qb_distance"] = out["target_distance_from_qb"]
+        out["throwing_lane_density"] = 0.0
         return out
 
     in_lane["qb_distance"]=qb_distance.loc[in_lane.index]
     in_lane["catch_distance"]=catch_distance.loc[in_lane.index]
     group_cols = ["gameId", "playId","frameId", "nflId"]
-    lane_summary = in_lane.groupby(group_cols).agg(throwing_lane_defender_count=("lane_distance","size"),throwing_lane_closest_distance=("lane_distance", "min"),throwing_lane_downfield_defender_count=("lane_progress",lambda progress: int((progress >= 0.35).sum())),throwing_lane_width=("throwing_lane_width", "first"),throwing_lane_near_qb_count=("qb_distance", lambda distance: int((distance <= 5.0).sum())),throwing_lane_near_catch_count=("catch_distance",lambda distance: int((distance <= 5.0).sum())),throwing_lane_facing_qb_count=("facing_qb", "sum"))
-    out = out.merge(lane_summary.reset_index(), on=group_cols, how="left")
+    closest_idx = in_lane.groupby(group_cols)["lane_distance"].idxmin()
+    closest_lane = in_lane.loc[closest_idx, group_cols + ["lane_progress", "qb_distance"]].rename(columns={"lane_progress": "throwing_lane_closest_progress", "qb_distance": "throwing_lane_closest_qb_distance"})
+    lane_summary = in_lane.groupby(group_cols).agg(throwing_lane_defender_count=("lane_distance","size"),throwing_lane_closest_distance=("lane_distance", "min"),throwing_lane_downfield_defender_count=("lane_progress",lambda progress: int((progress >= 0.35).sum())),throwing_lane_width=("throwing_lane_width", "first"),throwing_lane_near_qb_count=("qb_distance", lambda distance: int((distance <= 5.0).sum())),throwing_lane_near_catch_count=("catch_distance",lambda distance: int((distance <= 5.0).sum())),throwing_lane_facing_qb_count=("facing_qb", "sum"),throwing_lane_midfield_defender_count=("lane_progress", lambda progress: int(((progress > 0.15) & (progress < 0.85)).sum())))
+    lane_summary = lane_summary.reset_index().merge(closest_lane, on=group_cols, how="left")
+    out = out.merge(lane_summary, on=group_cols, how="left")
     out["throwing_lane_defender_count"] =out["throwing_lane_defender_count"].fillna(0)
     out["throwing_lane_closest_distance"]= out["throwing_lane_closest_distance"].fillna(
         6.0
@@ -236,6 +263,10 @@ def add_throwing_lane_features(receivers: pd.DataFrame, defenders: pd.DataFrame)
     out["throwing_lane_near_qb_count"]= out["throwing_lane_near_qb_count"].fillna(0)
     out["throwing_lane_near_catch_count"]= out["throwing_lane_near_catch_count"].fillna(0)
     out["throwing_lane_facing_qb_count"]= out["throwing_lane_facing_qb_count"].fillna(0)
+    out["throwing_lane_midfield_defender_count"] = out["throwing_lane_midfield_defender_count"].fillna(0)
+    out["throwing_lane_closest_progress"] = out["throwing_lane_closest_progress"].fillna(1.0)
+    out["throwing_lane_closest_qb_distance"] = out["throwing_lane_closest_qb_distance"].fillna(out["target_distance_from_qb"])
+    out["throwing_lane_density"] = out["throwing_lane_defender_count"] / np.maximum(out["target_distance_from_qb"], 1.0)
 
     return out
 
@@ -350,13 +381,15 @@ def add_catch_point_features(
 
 
 def add_qb_features(receivers: pd.DataFrame, offense: pd.DataFrame) -> pd.DataFrame:
-    qbs = offense.loc[offense["position"].eq("QB"),["gameId", "playId", "frameId", "x_norm", "y_norm", "s"]].rename(columns={"x_norm": "qb_x", "y_norm": "qb_y", "s": "qb_speed"})
+    qbs = offense.loc[offense["position"].eq("QB"),["gameId", "playId", "frameId", "x_norm", "y_norm", "s", "orientation_sin", "orientation_cos"]].rename(columns={"x_norm": "qb_x", "y_norm": "qb_y", "s": "qb_speed", "orientation_sin": "qb_orientation_sin", "orientation_cos": "qb_orientation_cos"})
 
     if qbs.empty:
         out = receivers.copy()
         out["qb_x"]=np.nan
         out["qb_y"]=np.nan
         out["qb_speed"]=np.nan
+        out["qb_orientation_sin"]=np.nan
+        out["qb_orientation_cos"]=np.nan
         return out
 
     qbs = qbs.drop_duplicates(["gameId","playId","frameId"])
@@ -416,6 +449,15 @@ def build_play_features(play_tracking: pd.DataFrame,play: pd.Series,route_runner
     receivers["target_point_x"] = np.where(use_actual_target, target_x, receivers["projected_receiver_x"])
     receivers["target_point_y"] = np.where(use_actual_target, target_y, receivers["projected_receiver_y"])
     receivers["target_point_distance_from_receiver"] = np.hypot(receivers["target_point_x"] - receivers["x_norm"],receivers["target_point_y"] - receivers["y_norm"])
+    qb_to_receiver_x = receivers["x_norm"] - receivers["qb_x"]
+    qb_to_receiver_y = receivers["y_norm"] - receivers["qb_y"]
+    qb_to_receiver_len = np.hypot(qb_to_receiver_x, qb_to_receiver_y).replace(0, np.nan)
+    qb_to_target_x = receivers["target_point_x"] - receivers["qb_x"]
+    qb_to_target_y = receivers["target_point_y"] - receivers["qb_y"]
+    qb_to_target_len = np.hypot(qb_to_target_x, qb_to_target_y).replace(0, np.nan)
+    receivers["qb_facing_receiver_cos"] = ((receivers["qb_orientation_sin"] * qb_to_receiver_x + receivers["qb_orientation_cos"] * qb_to_receiver_y) / qb_to_receiver_len)
+    receivers["qb_facing_target_cos"] = ((receivers["qb_orientation_sin"] * qb_to_target_x + receivers["qb_orientation_cos"] * qb_to_target_y) / qb_to_target_len)
+    receivers["target_front_side"] = receivers["qb_facing_target_cos"].ge(0.25).astype(int)
     receivers["target_depth"] = receivers["target_point_x"] - line_x
     receivers["target_width_from_middle"] = (receivers["target_point_y"] - FIELD_WIDTH / 2).abs()
     receivers["target_y_from_middle"] = receivers["target_point_y"] - FIELD_WIDTH/2
@@ -427,6 +469,7 @@ def build_play_features(play_tracking: pd.DataFrame,play: pd.Series,route_runner
     receivers["target_intermediate"] = receivers["target_depth"].between(10, 20, inclusive="left").astype(int)
     receivers["target_deep"] = receivers["target_depth"].ge(20).astype(int)
     receivers =add_throwing_lane_features(receivers,defenders)
+    receivers["receiver_lane_separation_gap"] = receivers["defender_1_distance"].fillna(8.0) - receivers["throwing_lane_closest_distance"]
     receivers = add_catch_point_features(receivers,defenders,offense)
 
     receivers["down"] = play["down"]
@@ -484,7 +527,7 @@ def build_feature_table(tracking: pd.DataFrame, plays: pd.DataFrame, player_play
 def load_tracking_weeks(data_dir: Path, weeks: Iterable[int]) -> pd.DataFrame:
     week_frames = []
     usecols = ["gameId", "playId", "nflId", "displayName", "frameId", "time", "club", "playDirection", "x",
-        "y", "s", "a", "dir","event"]
+        "y", "s", "a", "o", "dir","event"]
     for week in weeks:
         week_df = read_csv(data_dir, f"tracking_week_{week}.csv",usecols=usecols)
         week_df["week"]=int(week)
@@ -519,8 +562,32 @@ def add_week_train_test_split(features: pd.DataFrame,test_weeks:list[int]) -> pd
     return out
 
 
-def fit_expected_yards_models(features: pd.DataFrame, random_state: int, interception_yard_penalty: float, similar_throws: int, bayes_model_strength: float) -> tuple[pd.DataFrame, dict]:
+def add_calibration_buckets(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    depth_bins = [-np.inf, 5.0, 10.0, 20.0, np.inf]
+    depth_labels = ["short", "medium", "deep", "very_deep"]
+    out["cal_depth_bucket"] = pd.cut(out["target_depth"], bins=depth_bins, labels=depth_labels).astype(str)
+    out["cal_pressure_bucket"] = np.where(out["is_under_pressure"].fillna(0).astype(float).ge(0.5), "pressure", "clean")
+    out["cal_bucket"] = out["cal_depth_bucket"] + "_" + out["cal_pressure_bucket"]
+    return out
+
+
+def bucket_probability_lookup(train_data: pd.DataFrame, target_col: str, smoothing: float) -> tuple[dict[str, float], float]:
+    global_rate = float(train_data[target_col].mean()) if len(train_data) else 0.0
+    grouped = train_data.groupby("cal_bucket")[target_col].agg(["sum", "count"])
+    rates = (grouped["sum"] + global_rate * smoothing) / (grouped["count"] + smoothing)
+    return rates.to_dict(), global_rate
+
+
+def apply_bucket_calibration(raw_probability: np.ndarray, buckets: pd.Series, lookup: dict[str, float], global_rate: float, weight: float) -> np.ndarray:
+    bucket_rate = buckets.map(lookup).fillna(global_rate).astype(float).to_numpy()
+    calibrated = (1.0 - weight) * raw_probability + weight * bucket_rate
+    return np.clip(calibrated, 0.0, 1.0)
+
+
+def fit_expected_yards_models(features: pd.DataFrame, random_state: int, interception_yard_penalty: float, similar_throws: int, bayes_model_strength: float, interception_positive_weight_cap: float = 50.0) -> tuple[pd.DataFrame, dict]:
     model_data = features.loc[features["wasTargettedReceiver"].eq(1) & features["is_throw_frame"].eq(True)].copy()
+    model_data = add_calibration_buckets(model_data)
     model_data = model_data.dropna(subset=FEATURE_COLUMNS +["actual_epa"])
     if model_data.empty:
         raise ValueError("No targeted throw-frame rows were available for model training.")
@@ -556,19 +623,33 @@ def fit_expected_yards_models(features: pd.DataFrame, random_state: int, interce
 
     y_complete = model_data["hadPassReception"].astype(int)
     completion_model = fit_classifier( x.loc[train_mask], y_complete.loc[train_mask], random_state=random_state)
-    completion_valid_prob = positive_class_probability(completion_model, x.loc[test_mask])
+    completion_lookup, completion_global = bucket_probability_lookup(model_data.loc[train_mask], "hadPassReception", COMPLETION_SMOOTHING)
+    completion_valid_raw = positive_class_probability(completion_model, x.loc[test_mask])
+    completion_valid_prob = apply_bucket_calibration(completion_valid_raw, model_data.loc[test_mask, "cal_bucket"], completion_lookup, completion_global, COMPLETION_CALIBRATION_WEIGHT)
+    metrics["completion_brier_raw"] = float(brier_score_loss(y_complete.loc[test_mask], completion_valid_raw))
     metrics["completion_brier"] = float(brier_score_loss(y_complete.loc[test_mask], completion_valid_prob))
     metrics["completion_auc"] = (float(roc_auc_score(y_complete.loc[test_mask], completion_valid_prob))
         if y_complete.loc[test_mask].nunique() > 1
         else None)
 
     y_interception = model_data["is_interception"].astype(int)
-    interception_model = fit_classifier(x.loc[train_mask], y_interception.loc[train_mask], random_state=random_state)
-    interception_valid_prob = positive_class_probability(interception_model, x.loc[test_mask])
+    interception_model = fit_classifier(x.loc[train_mask], y_interception.loc[train_mask], random_state=random_state, positive_weight_cap=interception_positive_weight_cap)
+    interception_lookup, interception_global = bucket_probability_lookup(model_data.loc[train_mask], "is_interception", INTERCEPTION_SMOOTHING)
+    interception_valid_raw = positive_class_probability(interception_model, x.loc[test_mask])
+    interception_valid_prob = apply_bucket_calibration(interception_valid_raw, model_data.loc[test_mask, "cal_bucket"], interception_lookup, interception_global, INTERCEPTION_CALIBRATION_WEIGHT)
+    metrics["interception_brier_raw"] = float(brier_score_loss(y_interception.loc[test_mask], interception_valid_raw))
     metrics["interception_brier"] = float(brier_score_loss(y_interception.loc[test_mask], interception_valid_prob))
     metrics["interception_auc"] = (float(roc_auc_score(y_interception.loc[test_mask], interception_valid_prob))
         if y_interception.loc[test_mask].nunique() > 1
         else None)
+    train_interceptions = int(y_interception.loc[train_mask].sum())
+    train_non_interceptions = int(train_mask.sum() - train_interceptions)
+    metrics["interception_train_positives"] = train_interceptions
+    metrics["interception_train_negatives"] = train_non_interceptions
+    metrics["interception_positive_weight_cap"] = float(interception_positive_weight_cap)
+    metrics["probability_calibration"] = "depth_pressure_bucket_blend"
+    metrics["completion_calibration_weight"] = COMPLETION_CALIBRATION_WEIGHT
+    metrics["interception_calibration_weight"] = INTERCEPTION_CALIBRATION_WEIGHT
 
     epa_model = fit_regressor(x.loc[train_mask],model_data["actual_epa"].astype(float).loc[train_mask],random_state=random_state)
     valid_epa = epa_model.predict(x.loc[test_mask])
@@ -673,13 +754,15 @@ def fit_expected_yards_models(features: pd.DataFrame, random_state: int, interce
 
     predicted_yards_if_completed_low = np.minimum(predicted_yards_if_completed_low, predicted_yards_if_completed)
     predicted_yards_if_completed_high = np.maximum(predicted_yards_if_completed_high, predicted_yards_if_completed)
-    scored = features.copy()
+    scored = add_calibration_buckets(features)
     scored_features = scored[FEATURE_COLUMNS]
-    scored["completion_probability"] = positive_class_probability(completion_model, scored_features)
+    scored["completion_probability_raw"] = positive_class_probability(completion_model, scored_features)
+    scored["completion_probability"] = apply_bucket_calibration(scored["completion_probability_raw"].to_numpy(), scored["cal_bucket"], completion_lookup, completion_global, COMPLETION_CALIBRATION_WEIGHT)
     uncertainty = estimate_completion_uncertainty(scored=scored, train_throws=model_data.loc[train_mask], model_completion_probability=scored["completion_probability"].to_numpy(), k=similar_throws, model_strength=bayes_model_strength,)
     for column in uncertainty.columns:
         scored[column] = uncertainty[column].to_numpy()
-    scored["interception_probability"] = positive_class_probability(interception_model, scored_features)
+    scored["interception_probability_raw"] = positive_class_probability(interception_model, scored_features)
+    scored["interception_probability"] = apply_bucket_calibration(scored["interception_probability_raw"].to_numpy(), scored["cal_bucket"], interception_lookup, interception_global, INTERCEPTION_CALIBRATION_WEIGHT)
     scored["incompletion_probability"] = (1.0 - scored["completion_probability"] - scored["interception_probability"]).clip(lower=0.0)
     scored["predicted_yards_if_completed"] = predicted_yards_if_completed
     scored["predicted_air_yards_if_completed"] = predicted_air_yards
@@ -719,11 +802,18 @@ def grouped_train_valid_indices(x: pd.DataFrame, groups: pd.Series, random_state
 
 
 
-def fit_classifier(x_train: pd.DataFrame, y_train: pd.Series, random_state: int):
+def fit_classifier(x_train: pd.DataFrame, y_train: pd.Series, random_state: int, positive_weight_cap: float = 25.0):
     if y_train.nunique() <= 1:
         model = DummyClassifier(strategy="most_frequent")
         model.fit(x_train, y_train)
         return model
+
+    class_counts = y_train.value_counts()
+    pos = int(class_counts.get(1, 0))
+    neg = int(class_counts.get(0, 0))
+    scale_pos_weight = 1.0
+    if pos > 0 and neg > 0 and pos / (pos + neg) < 0.10:
+        scale_pos_weight = min(float(positive_weight_cap), neg / pos)
 
     base_model = XGBClassifier(
         n_estimators=350,
@@ -736,8 +826,8 @@ def fit_classifier(x_train: pd.DataFrame, y_train: pd.Series, random_state: int)
         random_state=random_state,
         n_jobs=-1,
         tree_method="hist",
+        scale_pos_weight=scale_pos_weight,
     )
-    class_counts = y_train.value_counts()
     if len(y_train) >= 60 and class_counts.min() >= 3:
         model = CalibratedClassifierCV(base_model, method="isotonic", cv=3)
     else:
@@ -919,7 +1009,7 @@ def main() -> None:
         features = add_week_train_test_split(features, args.test_weeks)
     else:
         features = add_play_train_test_split(features, test_size=args.test_size, random_state=args.random_state)
-    scored, metrics = fit_expected_yards_models( features, random_state=args.random_state, interception_yard_penalty=args.interception_yard_penalty, similar_throws=args.similar_throws, bayes_model_strength=args.bayes_model_strength)
+    scored, metrics = fit_expected_yards_models( features, random_state=args.random_state, interception_yard_penalty=args.interception_yard_penalty, similar_throws=args.similar_throws, bayes_model_strength=args.bayes_model_strength, interception_positive_weight_cap=args.interception_positive_weight_cap)
 
     feature_path = args.output_dir / "receiver_opportunity_features.csv"
     scored_path = args.output_dir / "receiver_expected_yards.csv"
@@ -927,7 +1017,7 @@ def main() -> None:
     metrics_path = args.output_dir / "model_metrics.json"
 
     feature_columns_to_write = [ "gameId", "playId", "week","frameId", "nflId", "displayName", "routeRan", "split", "end_reason","play_duration_seconds", "is_throw_frame", "passResult", "wasTargettedReceiver", "hadPassReception", "is_interception", "receivingYards","actual_air_yards","actual_yac","actual_epa",*FEATURE_COLUMNS,]
-    score_columns_to_write = [ *feature_columns_to_write, "completion_probability", "completion_probability_bayes", "completion_probability_low", "completion_probability_high", "completion_probability_p25", "completion_probability_p50", "completion_probability_p75", "completion_probability_iqr", "completion_probability_range", "similar_throw_effective_sample_size", "similar_throw_completion_rate", "similar_throw_mean_distance","similar_throw_min_distance","interception_probability", "incompletion_probability", "predicted_yards_if_completed", "predicted_air_yards_if_completed", "predicted_yac_if_completed", "predicted_yards_if_completed_low", "predicted_yards_if_completed_high", "predicted_yards_if_completed_p25", "predicted_yards_if_completed_p50","predicted_yards_if_completed_p75", "predicted_yards_if_completed_iqr", "completion_expected_yards", "completion_expected_yards_low", "completion_expected_yards_high", "interception_yards_risk", "risk_adjusted_expected_yards", "risk_adjusted_expected_yards_low", "risk_adjusted_expected_yards_high", "expected_yards_p25", "expected_yards_p50", "expected_yards_p75", "expected_yards_iqr","expected_yards","predicted_epa"]
+    score_columns_to_write = [ *feature_columns_to_write, "cal_depth_bucket", "cal_pressure_bucket", "cal_bucket", "completion_probability_raw", "completion_probability", "completion_probability_bayes", "completion_probability_low", "completion_probability_high", "completion_probability_p25", "completion_probability_p50", "completion_probability_p75", "completion_probability_iqr", "completion_probability_range", "similar_throw_effective_sample_size", "similar_throw_completion_rate", "similar_throw_mean_distance","similar_throw_min_distance","interception_probability_raw", "interception_probability", "incompletion_probability", "predicted_yards_if_completed", "predicted_air_yards_if_completed", "predicted_yac_if_completed", "predicted_yards_if_completed_low", "predicted_yards_if_completed_high", "predicted_yards_if_completed_p25", "predicted_yards_if_completed_p50","predicted_yards_if_completed_p75", "predicted_yards_if_completed_iqr", "completion_expected_yards", "completion_expected_yards_low", "completion_expected_yards_high", "interception_yards_risk", "risk_adjusted_expected_yards", "risk_adjusted_expected_yards_low", "risk_adjusted_expected_yards_high", "expected_yards_p25", "expected_yards_p50", "expected_yards_p75", "expected_yards_iqr","expected_yards","predicted_epa"]
 
     features[feature_columns_to_write].to_csv(feature_path, index=False)
     scored[score_columns_to_write].to_csv(scored_path, index=False)

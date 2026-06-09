@@ -127,4 +127,4 @@ The optional graph transformer writes to `graph_transformer_smoke/` by default w
 - `graph_receiver_opportunities.csv`: inference output when running graph inference.
 - `graph_play_decision_summary.csv`: graph-model target choice summary.
 
-The graph metadata includes the best validation epoch and total-yards MAE.
+The graph metadata includes the best validation epoch, prediction task, and the validation metric used for checkpoint selection.

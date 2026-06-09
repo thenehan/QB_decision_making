@@ -18,13 +18,17 @@ In football terms, this is trying to separate:
 
 ## Executive Summary
 
-The main XGBoost model evaluated 6,366 targeted passing plays and more than 1.1 million receiver-frame opportunities from Weeks 1-9 in 2022 (even though its the 2025 BDB. On the test set, the model predicted completion with a 0.786 AUC — a good predictive score that shows the model is learning, while a 0.5 AUC would be closer to a coin-flip model — and total receiving yards with a 3.85 MAE, meaning our predictions were off by less than 4 yards on average. I also tried using a GAT model with a temporal transformer, but XGBoost still had the better total-yards error. The graph model was better at predicting YAC, which suggests it is learning some movement information, but it is not ready to replace the XGBoost model.
+The main finding is that quarterback decision making is more complicated than the box score. A completion is not always the best decision, and an incompletion is not always a bad decision. This project grades the decision before the ball is thrown.
 
-On the test split, quarterbacks threw to the model's best receiver about 25.2% of the time. When close choices are counted with a dynamic acceptable range, that rises to 40.3%. The average missed value was about 3.5 expected yards at the actual throw frame. Timing was stricter: the right receiver at the right time happened about 5.0% of the time, while acceptable timing happened about 17.9% of the time.
+The main XGBoost model evaluated 6,365 targeted passing plays and more than 1.1 million receiver-frame opportunities from Weeks 1-9 of the 2022 season. On the test set, the model predicted completion with a 0.786 AUC, interception risk with a 0.788 AUC, and completed receiving yards with a 3.92-yard mean absolute error. This is the primary model used for quarterback decision grading.
+
+The graph attention model improved after adding route, QB-facing, pressure, throwing-lane, and catch-point features. It also improved after reducing the interception weighting and training separate task versions for outcome, air yards, and YAC. Even after those changes, XGBoost was still more accurate on every prediction target, so the graph model should be treated as an experimental movement model rather than the final evaluator.
+
+Across all evaluated throws, quarterbacks threw to the model's best receiver about 20.1% of the time at the P50 estimate. When close choices are counted with a dynamic acceptable range, that rises to 35.6%. The average missed value was about 3.7 expected yards at the actual throw frame. Timing was stricter: the right receiver at the right time happened about 4.6% of the time, while acceptable timing happened about 13.7% of the time.
 
 This does not mean quarterbacks are usually wrong, as there are factors that are not entirely quantitative, such as yards to go, play design, and what the quarterback's progression was on that play. Interception percentage is also more variable because of the small number of interceptions, which makes that part of the model and the yardage penalty less stable. But this model can tell us when it believes there was another receiver or another moment to throw that looked better. This can be valuable as a film-study flag, not as an automatic negative grade.
 
-Among QBs with at least 50 throws, Lamar Jackson, Patrick Mahomes, Marcus Mariota, P.J. Walker, and Cooper Rush had some of the lowest missed expected yards. Their acceptable-choice rates were 52.0% for Jackson, 43.4% for Mahomes, 43.7% for Mariota, 42.3% for Walker, and 40.7% for Rush. The strongest acceptable-choice rates overall included Lamar Jackson at 52.0%, Jalen Hurts at 48.1%, Aaron Rodgers at 47.6%, Tua Tagovailoa at 47.2%, Zach Wilson at 44.2%, Russell Wilson at 44.0%, Ryan Tannehill at 43.9%, Justin Fields at 43.8%, Marcus Mariota at 43.7%, Patrick Mahomes at 43.4%, Trevor Lawrence at 43.2%, and Josh Allen at 43.1%. These results are interesting because they suggest the model may value riskier play more than traditional metrics. This could be due to inefficiencies in the data pipeline, such as the need for a more robust interception model, but it could also suggest that some quarterbacks are making correct decisions that do not always turn into successful plays because of accuracy, receiver execution, or other factors.
+Among QBs with at least 100 throws, Tua Tagovailoa had the highest exact best-choice rate at 30.3%, followed by Ryan Tannehill at 27.2%, Lamar Jackson at 27.1%, Baker Mayfield at 24.5%, and Patrick Mahomes at 24.2%. Lamar Jackson had the strongest acceptable-choice rate at 44.6%, followed by Cooper Rush at 43.4%, Justin Fields at 43.0%, Tua Tagovailoa at 43.0%, and Marcus Mariota at 43.0%.
 
 The best use of this project is to identify plays where the model and the quarterback disagreed, then watch the film. The scout can ask: was the better option actually visible, did pressure force the throw, was the quarterback working a designed read, or did he really miss a better window?
 
@@ -148,9 +152,37 @@ It also uses football context like:
 - defender spacing
 - down and distance
 
-The second model is a graph attention plus temporal transformer model. It looks at player locations over time. This is closer to how a play unfolds visually, because it sees the movement of all players across multiple frames.
+After the model predicts completion and interception probability, the code calibrates those probabilities by throw depth and pressure. In football terms, this means deep pressured throws get compared to other deep pressured throws, and short clean throws get compared to other short clean throws. That keeps the value model from giving too much credit to risky throws just because the upside is high.
 
-The graph model is useful, but in the current results it is still experimental. It did better on YAC error, but XGBoost did better on total yards error. For the final scouting interpretation, XGBoost is the main model.
+The second model is a graph attention model. It looks at player locations over time. This is closer to how a play unfolds visually, because it sees the movement of all players across multiple frames.
+
+The newer graph version uses a GATv2-style player attention model with an LSTM over the target receiver's frame sequence and PNA-style pooling for YAC. In football terms, the model can learn which nearby players matter most, watch the route develop over time, then summarize the whole catch environment with several views: average spacing, maximum space, minimum danger, and variation around the target. It also runs a simple two-view symmetry pass, using the original play and a 180-degree rotated feature view, then averages the embeddings.
+
+The graph model now also gets more football-specific context on each receiver option: route type, whether the QB is facing the receiver, target depth, QB-to-target distance, nearest rusher distance, pressure score, throwing-lane defender count, closest throwing-lane defender, and nearest defender at the catch point. This should make the graph model less dependent on raw coordinates alone and more comparable to the XGBoost model.
+
+The graph model is useful, but in the current results it is still experimental. It improved after the added football features and separate task training, but XGBoost still performed better on completion, interception, air yards, and YAC. For the final scouting interpretation, XGBoost is the main model.
+
+The main reason XGBoost is stronger here is that this project has a lot of structured football features already built by hand. For example, the tree model is directly given throw depth, receiver spacing, pressure, passing-lane defenders, catch-point defender distance, route context, and down-and-distance. Those are exactly the kinds of clues a decision model needs. The graph model sees the play more visually, but it has fewer labeled examples and has to learn many of those football concepts from player movement. With this amount of data, the tree model is better at using the clear, engineered football signals.
+
+## Why These Architectures
+
+I used XGBoost as the main model because the core decision problem is tabular. Each receiver-frame can be described with a row of football information: where the receiver is, how far the throw would be, how close the nearest defender is, whether the QB is pressured, how many defenders are in the throwing lane, and what the down-and-distance situation is. XGBoost is strong for this kind of problem because it can find useful cutoffs and combinations, like short throws under pressure, deep throws with a defender in the lane, or open receivers near the sticks.
+
+For completion probability, XGBoost makes sense because completion is often driven by clear football thresholds. A five-yard throw with separation is very different from a twenty-yard throw into traffic. A tree model handles those split points naturally.
+
+For interception probability, XGBoost also makes sense because interceptions are rare and usually depend on risk factors stacking together. Deep target, tight coverage, pressure, and a defender in the throwing lane are more dangerous together than separately. XGBoost can capture those interactions without needing a huge neural network.
+
+For air yards, XGBoost is especially useful because air yards are closely tied to receiver depth, field position, route, and QB-to-target geometry. Those are directly engineered in the data, so the model does not have to learn basic field geometry from scratch.
+
+For YAC, I tested the graph model because YAC is more movement-based. After the catch, the important question is not just where the receiver is, but how the defense is arranged around him. A graph model is a natural fit for that because it treats players as connected objects and can learn which nearby defenders or blockers matter.
+
+I used GATv2 for the graph model because attention lets the model decide which players matter most on each frame. For one receiver, the nearest trailing defender may matter most. For another, a safety closing from depth may matter more. GATv2 gives the model flexibility to weight those relationships instead of treating every player equally.
+
+I used an LSTM on top of the graph frames because receiver value changes over time. A receiver may be covered at the snap, open during the break, and covered again by the time the ball is thrown. The LSTM gives the graph model memory of how the target's situation developed across the play.
+
+I used PNA-style pooling because YAC depends on the whole local environment, not just one defender. The average spacing, closest danger, most open space, and variation in player locations can all matter. PNA pooling gives the model several summaries of the player graph instead of only one average.
+
+The final result is that XGBoost is the best architecture for the main decision model in this project, while the graph model is the better architectural idea for future YAC and movement-based work. The graph model is more football-natural, but it needs more data, calibration, and tuning before it can replace the tree model.
 
 ## Uncertainty
 
@@ -175,37 +207,37 @@ In the test results, the quarterback decision rates changed depending on which e
 
 ```text
 P25 lower estimate:
-Best receiver choice rate: 23.5%
-Acceptable receiver choice rate: 36.3%
-Average missed expected yards: 3.0
+Best receiver choice rate: 20.8%
+Acceptable receiver choice rate: 34.3%
+Average missed expected yards: 3.2
 
 P50 middle estimate:
-Best receiver choice rate: 25.2%
-Acceptable receiver choice rate: 40.3%
-Average missed expected yards: 3.5
+Best receiver choice rate: 20.1%
+Acceptable receiver choice rate: 35.6%
+Average missed expected yards: 3.7
 
 P75 higher estimate:
-Best receiver choice rate: 25.5%
-Acceptable receiver choice rate: 42.3%
-Average missed expected yards: 3.6
+Best receiver choice rate: 21.5%
+Acceptable receiver choice rate: 39.2%
+Average missed expected yards: 3.8
 ```
 
-This means the overall conclusion is pretty stable. Even when the model uses the lower estimate, QBs still threw to the exact best receiver only about 23.5% of the time. When close decisions are counted as acceptable with the dynamic range, the number is about 36% to 42% of throws across the three estimates.
+This means the overall conclusion is pretty stable. Even when the model uses the lower estimate, QBs still threw to the exact best receiver only about 20.8% of the time. When close decisions are counted as acceptable with the dynamic range, the number is about 34% to 39% of throws across the three estimates.
 
 Timing changes more across the uncertainty range:
 
 ```text
 P25 lower estimate:
-Right receiver and right time: 8.1%
-Acceptable timing: 22.2%
+Right receiver and right time: 7.1%
+Acceptable timing: 20.2%
 
 P50 middle estimate:
-Right receiver and right time: 5.0%
-Acceptable timing: 17.9%
+Right receiver and right time: 4.6%
+Acceptable timing: 13.7%
 
 P75 higher estimate:
-Right receiver and right time: 5.4%
-Acceptable timing: 20.5%
+Right receiver and right time: 5.5%
+Acceptable timing: 18.4%
 ```
 
 The lower estimate is more forgiving on timing because it shrinks some of the high-upside windows. The dynamic acceptable range also makes the timing grade more realistic: missing a 25-yard window by 2 yards is not treated the same as missing a 5-yard window by 2 yards.
@@ -305,6 +337,14 @@ Train the graph model:
 
 ```bash
 make graph-train DATA_DIR=..
+```
+
+The graph code can also train smaller component models. This is useful because completion/interception, air yards, and YAC are different football problems. The outcome model learns completion and interception risk, the air-yards model learns target depth, and the YAC model learns space after the catch.
+
+```bash
+python spatiotemporal_graph_transformer.py --data-dir .. --output-dir graph_outcome_all_weeks --weeks 1 2 3 4 5 6 7 8 9 --prediction-task outcome
+python spatiotemporal_graph_transformer.py --data-dir .. --output-dir graph_air_yards_all_weeks --weeks 1 2 3 4 5 6 7 8 9 --prediction-task air_yards
+python spatiotemporal_graph_transformer.py --data-dir .. --output-dir graph_yac_all_weeks --weeks 1 2 3 4 5 6 7 8 9 --prediction-task yac
 ```
 
 Run graph inference and summarize graph choices:
