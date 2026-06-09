@@ -1,3 +1,4 @@
+# Tom Henehan - June 9, 2026
 """Score graph choices."""
 
 from __future__ import annotations

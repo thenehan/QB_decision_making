@@ -1,3 +1,4 @@
+# Tom Henehan - June 9, 2026
 """Compare model errors."""
 
 from __future__ import annotations
